@@ -10,10 +10,10 @@ import configparser
 import sys
 import shutil
 import socket
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
-__VERSION__ = "1.0.0"
+__VERSION__ = "1.0.1"
 DEFAULT_SERVER_URL = "https://api.stratamonitor.com/api/v1/agent/sync"
 
 def log(msg):
@@ -50,7 +50,6 @@ def init_db(db_path):
     cursor.execute('''CREATE TABLE IF NOT EXISTS scans (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, root_path TEXT, total_size_bytes INTEGER, disk_usage_bytes INTEGER, total_files INTEGER, scan_duration_sec REAL, disk_total_bytes INTEGER, disk_free_bytes INTEGER)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS directories (id INTEGER PRIMARY KEY AUTOINCREMENT, scan_id INTEGER, path TEXT, parent_path TEXT, depth INTEGER, size_bytes INTEGER, subtree_size_bytes INTEGER, file_count INTEGER, mtime REAL, top_extensions_json TEXT, top_owners_json TEXT, FOREIGN KEY(scan_id) REFERENCES scans(id))''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS scan_errors (id INTEGER PRIMARY KEY AUTOINCREMENT, scan_id INTEGER, path TEXT, error_message TEXT, FOREIGN KEY(scan_id) REFERENCES scans(id))''')
-    # Removed reports table
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_dirs_scan_id ON directories(scan_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_dirs_parent ON directories(parent_path)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_scans_root ON scans(root_path)')
@@ -85,7 +84,7 @@ def cleanup_retention(db_path, days_to_keep):
     except Exception as e: log(f"Error during cleanup: {e}")
 
 def fast_walk_bottom_up(top, on_error=None):
-    dirs = []; files = []
+    dirs = []; files =[]
     try:
         with os.scandir(top) as it:
             for entry in it:
@@ -100,7 +99,7 @@ def fast_walk_bottom_up(top, on_error=None):
     yield top, dirs, files
 
 def scan_directory(root_path, db_path, exclude_list=None, progress_callback=None):
-    if exclude_list is None: exclude_list = []
+    if exclude_list is None: exclude_list =[]
     log(f"--- Scanning: {root_path} (High Performance) ---")
     if not os.path.exists(db_path): init_db(db_path)
     start_time = time.time()
@@ -124,7 +123,7 @@ def scan_directory(root_path, db_path, exclude_list=None, progress_callback=None
     
     total_scan_size = 0; total_scan_files = 0; subtree_sizes = defaultdict(int)
     root_path = os.path.abspath(root_path)
-    exclude_list = [os.path.abspath(ex) for ex in exclude_list]
+    exclude_list =[os.path.abspath(ex) for ex in exclude_list]
 
     def on_walk_error(e):
         try:
@@ -134,7 +133,7 @@ def scan_directory(root_path, db_path, exclude_list=None, progress_callback=None
             err_conn.commit(); err_conn.close()
         except: pass
 
-    batch_data = []
+    batch_data =[]
     BATCH_SIZE = 10000
     files_since_update = 0
 
@@ -174,7 +173,7 @@ def scan_directory(root_path, db_path, exclude_list=None, progress_callback=None
         if len(batch_data) >= BATCH_SIZE:
             cursor.executemany('''INSERT INTO directories (scan_id, path, parent_path, depth, size_bytes, subtree_size_bytes, file_count, mtime, top_extensions_json, top_owners_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', batch_data)
             conn.commit()
-            batch_data = []
+            batch_data =[]
 
         if progress_callback:
             files_since_update += current_dir_files_count
@@ -245,12 +244,11 @@ def execute_sql_task(db_path, query):
         cursor = conn.cursor()
         cursor.execute(query)
         rows = cursor.fetchall()
-        result = [dict(row) for row in rows]
+        result =[dict(row) for row in rows]
         conn.close()
         return {"data": result}
     except Exception as e: return {"error": str(e)}
 
-# UPDATED: Returns a summary string instead of just logging, for GUI support
 def check_tasks(api_url, api_key, db_path):
     if not api_url: return "Server URL not configured."
     base_url = api_url.split("/agent")[0] + "/agent"
@@ -261,12 +259,12 @@ def check_tasks(api_url, api_key, db_path):
     log(f"Checking tasks at: {tasks_url}")
     headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}', 'User-Agent': f'StrataClient/{__VERSION__}'}
     
-    summary = []
+    summary =[]
     
     try:
         req = urllib.request.Request(tasks_url, data=json.dumps({"hostname": hostname}).encode('utf-8'), method='POST', headers=headers)
         with urllib.request.urlopen(req, timeout=10) as response:
-            tasks = json.loads(response.read().decode('utf-8')).get("tasks", [])
+            tasks = json.loads(response.read().decode('utf-8')).get("tasks",[])
         
         if not tasks: 
             return "No pending tasks."
@@ -287,10 +285,10 @@ def check_tasks(api_url, api_key, db_path):
                 summary.append(f"Task {task_id} (SQL): {status}")
             
             elif task_type == "execute_sql_batch":
-                sqls = task.get("payload", {}).get("sqls", [])
+                sqls = task.get("payload", {}).get("sqls",[])
                 if not isinstance(sqls, list): result_data = {"error": "Payload 'sqls' must be a list"}; status = "error"
                 else:
-                    batch_output = []
+                    batch_output =[]
                     log(f"Processing batch of {len(sqls)} SQL queries...")
                     for sql in sqls:
                         res = execute_sql_task(db_path, sql)
@@ -375,7 +373,7 @@ def run_chat_loop(user_query, history, server_config, db_path, debug_mode=False)
             exec_result = execute_sql_task(db_path, sql_query)
             result_str = json.dumps(exec_result, ensure_ascii=False)
             history.append({"role": "user", "type": "tool_result", "content": result_str})
-            rows_count = len(exec_result.get('data', [])) if 'data' in exec_result else 'Error'
+            rows_count = len(exec_result.get('data',[])) if 'data' in exec_result else 'Error'
             log_debug(f"Rows returned: {rows_count}", debug_mode)
             log_debug(f"SQL RESULT PAYLOAD: {result_str}", debug_mode)
             time.sleep(5); continue
@@ -388,6 +386,40 @@ def run_chat_loop(user_query, history, server_config, db_path, debug_mode=False)
         else: return {"success": False, "message": f"Unknown server action: {action}"}
     return {"success": False, "message": "Max autonomous iterations reached."}
 
+# NEW: Update Checker Mechanism
+def check_for_updates(current_version):
+    """Checks the GitHub API for the latest release tag."""
+    try:
+        url = "https://api.github.com/repos/stratamonitor/strata-agent/releases/latest"
+        req = urllib.request.Request(url, headers={'User-Agent': f'StrataClient/{current_version}'})
+        # Timeout set to 2 seconds to not block disconnected servers
+        with urllib.request.urlopen(req, timeout=2) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            
+            tag_name = data.get("tag_name", "")
+            html_url = data.get("html_url", "")
+            
+            if not tag_name: 
+                return None
+                
+            latest_v_str = tag_name.lstrip('v')
+            
+            # Safe semantic version comparison
+            try:
+                curr_parts = tuple(map(int, current_version.split('.')))
+                latest_parts = tuple(map(int, latest_v_str.split('.')))
+                if latest_parts > curr_parts:
+                    return {"has_update": True, "latest_version": latest_v_str, "url": html_url}
+            except ValueError:
+                # Fallback string comparison if version structure is abnormal
+                if latest_v_str != current_version:
+                    return {"has_update": True, "latest_version": latest_v_str, "url": html_url}
+                    
+            return {"has_update": False}
+    except Exception:
+        # Ignore network errors, rate limits, or isolated environments silently
+        return None
+
 if __name__ == "__main__":
     config = load_config("strata.ini")
     defaults = {"db": config.get("General", "db_path", fallback="strata.db"), "exclude": ""}
@@ -395,12 +427,19 @@ if __name__ == "__main__":
     parser.add_argument("--scan", type=str); parser.add_argument("--report", type=str); parser.add_argument("--db", type=str, default=defaults["db"]); parser.add_argument("--exclude", type=str)
     parser.add_argument("--check-tasks", action="store_true", help="Check server for tasks")
     args = parser.parse_args()
+    
+    # NEW: Check for updates before running any CLI command
+    update_info = check_for_updates(__VERSION__)
+    if update_info and update_info.get("has_update"):
+        # Print update warning in yellow using ANSI escape codes
+        print(f"\033[93m⚠️  UPDATE AVAILABLE: A new version (v{update_info['latest_version']}) is available! Download at: {update_info['url']}\033[0m\n")
+    
     excludes = []
     if args.scan: scan_directory(args.scan, args.db, excludes)
     elif args.check_tasks:
         url = config.get("Server", "url", fallback=DEFAULT_SERVER_URL); key = config.get("Server", "key", fallback="")
         if url and key: 
             res = check_tasks(url, key, args.db)
-            print(res) # CLI still prints
+            print(res) 
         else: log("Server URL/Key missing in strata.ini")
     else: parser.print_help()

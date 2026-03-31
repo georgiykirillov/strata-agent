@@ -99,10 +99,15 @@ def load_chart_data(db_path, scan_id, total_size):
 
 def get_targets(conn):
     try: return pd.read_sql("SELECT DISTINCT root_path FROM scans ORDER BY root_path", conn)['root_path'].tolist()
-    except: return []
+    except: return[]
 
 def get_snapshots(conn, root_path):
     return pd.read_sql("SELECT id, timestamp, total_size_bytes, disk_total_bytes, disk_free_bytes FROM scans WHERE root_path = ? ORDER BY id DESC", conn, params=(root_path,))
+
+# NEW: Cached Update Checker (TTL 1 Hour)
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_update_info(current_version):
+    return strata.check_for_updates(current_version)
 
 def render_sidebar(conn):
     st.sidebar.title(f"Strata v{strata.__VERSION__}")
@@ -129,35 +134,44 @@ def render_sidebar(conn):
 
             with st.spinner(f"Scanning {target_path}..."):
                 config = get_config(); db = config.get("General", "db_path", fallback="strata.db")
-                exc_str = config.get("General", "exclude", fallback=""); excludes = [e.strip() for e in exc_str.split(",") if e.strip()]
+                exc_str = config.get("General", "exclude", fallback=""); excludes =[e.strip() for e in exc_str.split(",") if e.strip()]
                 strata.scan_directory(target_path, db, excludes, progress_callback=update_progress)
                 load_chart_data.clear()
                 status_text.empty()
                 st.sidebar.success("Done!"); time.sleep(1); st.rerun()
 
     if not is_new:
-        # FIXED: Vertical layout with icons, full width
-        if st.sidebar.button("🔌 Test Connection", use_container_width=True):
-            config = get_config()
-            url = config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL)
-            key = config.get("Server", "key", fallback="")
-            if not url: st.sidebar.error("Server URL missing!")
-            else:
-                with st.spinner("Pinging server..."):
-                    res = strata.test_connection(url, key)
-                    if res["success"]: st.sidebar.success(res["message"])
-                    else: st.sidebar.error(res["message"])
+        col_test, col_tasks = st.sidebar.columns(2)
         
-        if st.sidebar.button("🔄 Check Server Tasks", use_container_width=True):
-            config = get_config()
-            url = config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL)
-            key = config.get("Server", "key", fallback="")
-            db = config.get("General", "db_path", fallback="strata.db")
-            if not url or not key: st.sidebar.error("Configure Server & Key in Settings first.")
-            else:
-                with st.spinner("Checking tasks..."):
-                    res = strata.check_tasks(url, key, db)
-                    st.sidebar.info(res)
+        with col_test:
+            if st.button("🔌 Test Conn.", use_container_width=True): 
+                config = get_config()
+                url = config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL)
+                key = config.get("Server", "key", fallback="")
+                if not url: st.sidebar.error("No URL!")
+                else:
+                    with st.spinner("Pinging..."):
+                        res = strata.test_connection(url, key)
+                        if res["success"]: st.sidebar.success("OK")
+                        else: st.sidebar.error("Fail")
+        
+        with col_tasks:
+            if st.button("🔄 Check Tasks", use_container_width=True):
+                config = get_config()
+                url = config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL)
+                key = config.get("Server", "key", fallback="")
+                db = config.get("General", "db_path", fallback="strata.db")
+                if not url or not key: st.sidebar.error("No Creds")
+                else:
+                    with st.spinner("Checking..."):
+                        res = strata.check_tasks(url, key, db)
+                        st.sidebar.info(res)
+                        
+    # NEW: Show Update Notification if available
+    st.sidebar.divider()
+    update_info = get_update_info(strata.__VERSION__)
+    if update_info and update_info.get("has_update"):
+        st.sidebar.info(f"🚀 **Update Available:** v{update_info['latest_version']}\n\n[Download Here]({update_info['url']})")
     
     return target_path, is_new, page
 
@@ -173,10 +187,8 @@ def view_dashboard(conn, target_path):
     scan_id = scan_data['id']
     full_scan_data = pd.read_sql(f"SELECT * FROM scans WHERE id = {scan_id}", conn).iloc[0]
 
-    # FIXED: Compact Error Display with Vertical Alignment
     error_count = pd.read_sql(f"SELECT count(*) as cnt FROM scan_errors WHERE scan_id = {scan_id}", conn).iloc[0]['cnt']
     if error_count > 0:
-        # vertical_alignment="center" works in Streamlit 1.31+
         ec1, ec2 = st.columns([0.85, 0.15], vertical_alignment="center") 
         with ec1:
             st.error(f"{error_count} errors during scan.", icon="⚠️")
@@ -237,7 +249,7 @@ def view_dashboard(conn, target_path):
         if not df.empty:
             df['formatted_size'] = df['size'].apply(format_bytes)
             df['short_name'] = df['path'].apply(lambda p: os.path.basename(p) if p != "/" and p != "" else "ROOT")
-            custom_colors = [(0.0, "#7effdb"), (0.142, "#5baa65"), (0.285, "#809e31"), (0.428, "#9d8f23"), (0.571, "#b57f00"), (0.714, "#9e5c1e"), (0.857, "#924424"), (1.0, "#841b2a")]
+            custom_colors =[(0.0, "#7effdb"), (0.142, "#5baa65"), (0.285, "#809e31"), (0.428, "#9d8f23"), (0.571, "#b57f00"), (0.714, "#9e5c1e"), (0.857, "#924424"), (1.0, "#841b2a")]
             if "Sunburst" in chart_type:
                 fig = px.sunburst(df, names='path', parents='parent_path', values='size', branchvalues='total', maxdepth=3, color='size', color_continuous_scale=custom_colors, custom_data=['formatted_size', 'short_name'])
             else:
@@ -248,7 +260,6 @@ def view_dashboard(conn, target_path):
             st.plotly_chart(fig, width="stretch")
         else: st.warning("No data.")
 
-# ... (view_chat, view_settings, main остались без изменений с прошлого раза) ...
 def view_chat():
     st.header("💬 AI Storage Assistant")
     config = get_config()
@@ -264,9 +275,9 @@ def view_chat():
         st.warning("Please configure Server URL in Settings to use Chat.")
         return
 
-    if "messages" not in st.session_state: st.session_state.messages = []
+    if "messages" not in st.session_state: st.session_state.messages =[]
     if st.button("🗑️ Clear History"):
-        st.session_state.messages = []
+        st.session_state.messages =[]
         st.rerun()
 
     for msg in st.session_state.messages:
@@ -318,7 +329,9 @@ def main():
         retention = config.getint("General", "retention_days", fallback=0)
         if retention > 0: strata.cleanup_retention(db_path, retention)
     conn = sqlite3.connect(db_path) if os.path.exists(db_path) else None
+    
     target_path, is_new, page = render_sidebar(conn)
+    
     if page == "Dashboard":
         if is_new: st.info("Start Initial Scan")
         elif conn: view_dashboard(conn, target_path)
@@ -326,6 +339,7 @@ def main():
         if conn: view_chat()
         else: st.info("Database not initialized.")
     elif page == "Settings": view_settings()
+    
     if conn: conn.close()
 
 if __name__ == "__main__": main()
