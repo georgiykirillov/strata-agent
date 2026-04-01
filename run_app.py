@@ -8,11 +8,13 @@ def resolve_path(path):
 
 if __name__ == "__main__":
     app_path = resolve_path("gui.py")
-    # Bind to 0.0.0.0 to allow LAN access
-    sys.argv = [
+    
+    # Запускаем Streamlit с жесткими настройками
+    sys.argv =[
         "streamlit", "run", app_path, 
         "--global.developmentMode=false", 
         "--server.headless=true",
-        "--server.address=0.0.0.0" 
+        "--server.address=0.0.0.0",
+        "--browser.gatherUsageStats=false"
     ]
     sys.exit(stcli.main())
