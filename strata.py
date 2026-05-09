@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
-__VERSION__ = "1.2.2"
+__VERSION__ = "1.2.3"
 DEFAULT_SERVER_URL = "https://api.stratamonitor.com/api/v1/agent/sync"
 
 def log(msg):
@@ -51,9 +51,14 @@ def init_db(db_path):
     cursor.execute('''CREATE TABLE IF NOT EXISTS scans (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, root_path TEXT, total_size_bytes INTEGER, disk_usage_bytes INTEGER, total_files INTEGER, scan_duration_sec REAL, disk_total_bytes INTEGER, disk_free_bytes INTEGER)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS directories (id INTEGER PRIMARY KEY AUTOINCREMENT, scan_id INTEGER, path TEXT, parent_path TEXT, depth INTEGER, size_bytes INTEGER, subtree_size_bytes INTEGER, file_count INTEGER, mtime REAL, top_extensions_json TEXT, top_owners_json TEXT, FOREIGN KEY(scan_id) REFERENCES scans(id))''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS scan_errors (id INTEGER PRIMARY KEY AUTOINCREMENT, scan_id INTEGER, path TEXT, error_message TEXT, FOREIGN KEY(scan_id) REFERENCES scans(id))''')
+    
+    # Indexes
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_dirs_scan_id ON directories(scan_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_dirs_parent ON directories(parent_path)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_scans_root ON scans(root_path)')
+    # NEW: Critical index for AI-generated Snapshot comparison JOINs
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_dir_scan_path ON directories (scan_id, path)')
+    
     try: cursor.execute('ALTER TABLE scans ADD COLUMN disk_total_bytes INTEGER')
     except: pass
     try: cursor.execute('ALTER TABLE scans ADD COLUMN disk_free_bytes INTEGER')
@@ -70,7 +75,7 @@ def cleanup_retention(db_path, days_to_keep):
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_to_keep)
         cutoff_str = cutoff_date.strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute("SELECT id FROM scans WHERE timestamp < ?", (cutoff_str,))
-        scan_ids = [row[0] for row in cursor.fetchall()]
+        scan_ids =[row[0] for row in cursor.fetchall()]
         if not scan_ids:
             conn.close(); return
         log(f"Cleaning up {len(scan_ids)} old scans (older than {days_to_keep} days)...")
@@ -236,25 +241,46 @@ def test_connection(api_url, api_key):
             return {"success": True, "message": "Connection Established!", "code": 200} if response.status == 200 else {"success": False, "message": f"Status {response.status}"}
     except Exception as e: return {"success": False, "message": str(e)}
 
-# UPDATED: Allow WITH clauses for Common Table Expressions (CTEs)
+# UPDATED: Kill-switch via progress_handler
 def execute_sql_task(db_path, query):
     if not query: return {"error": "Received empty SQL query from server."}
     
-    # Clean the query and check if it starts with SELECT or WITH
     cleaned_query = query.strip().upper()
     if not (cleaned_query.startswith("SELECT") or cleaned_query.startswith("WITH")): 
         return {"error": "Only SELECT or WITH queries are allowed."}
         
+    conn = get_db_connection(db_path)
+    
+    # Kill-switch variables
+    ops_count = [0]
+    MAX_OPS = 1000 # * 1000 = 1,000,000 internal VM instructions
+    
+    def progress_handler():
+        ops_count[0] += 1
+        if ops_count[0] > MAX_OPS:
+            return 1 # Return non-zero to abort query
+        return 0
+
     try:
-        conn = get_db_connection(db_path)
         conn.row_factory = sqlite3.Row
+        # Set handler to trigger every 1000 instructions
+        conn.set_progress_handler(progress_handler, 1000)
+        
         cursor = conn.cursor()
         cursor.execute(query)
         rows = cursor.fetchall()
         result = [dict(row) for row in rows]
-        conn.close()
         return {"data": result}
-    except Exception as e: return {"error": str(e)}
+        
+    except sqlite3.OperationalError as e:
+        if "interrupted" in str(e).lower():
+            return {"error": "Query took too long. Please optimize using CTEs or simpler JOINs."}
+        return {"error": str(e)}
+    except Exception as e: 
+        return {"error": str(e)}
+    finally:
+        conn.set_progress_handler(None, 0)
+        conn.close()
 
 def check_tasks(api_url, api_key, db_path):
     if not api_url: return "Server URL not configured."
