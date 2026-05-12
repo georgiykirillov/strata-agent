@@ -84,7 +84,7 @@ def check_password():
         return False
     return True
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def load_chart_data(db_path, scan_id, total_size):
     threshold = total_size * 0.0005 
     conn = sqlite3.connect(db_path)
@@ -153,7 +153,6 @@ def get_targets(conn):
 def get_snapshots(conn, root_path):
     return pd.read_sql("SELECT id, timestamp, total_size_bytes, disk_total_bytes, disk_free_bytes FROM scans WHERE root_path = ? ORDER BY id DESC", conn, params=(root_path,))
 
-# UPDATED: Reduced cache TTL to 10 minutes (600s) for faster update notifications
 @st.cache_data(ttl=600, show_spinner=False)
 def get_update_info(current_version):
     return strata.check_for_updates(current_version)
@@ -162,7 +161,7 @@ def render_sidebar(conn):
     st.sidebar.title(f"Strata v{strata.__VERSION__}")
     
     if "navigation" not in st.session_state: st.session_state.navigation = "Dashboard"
-    page = st.sidebar.radio("Go to",["Dashboard", "🔍 Diff View", "💬 Chat", "Settings"], key="navigation")
+    page = st.sidebar.radio("Go to", ["Dashboard", "🔍 Diff View", "💬 Chat", "Settings"], key="navigation")
     st.sidebar.divider()
 
     targets = get_targets(conn); options = targets + ["➕ New Scan..."]
@@ -357,10 +356,8 @@ def view_diff(conn, target_path):
         st.plotly_chart(fig, width="stretch")
 
     with col_inc:
-        # UPDATED: Increase = Red
         plot_diff_chart(df_inc, "Total Increase", px.colors.sequential.Reds)
     with col_dec:
-        # UPDATED: Decrease = Green
         plot_diff_chart(df_dec, "Total Decrease", px.colors.sequential.Greens)
 
 def view_chat():
@@ -398,7 +395,11 @@ def view_chat():
                 if res["success"]:
                     st.session_state.messages = res["history"]
                     st.markdown(res["answer"])
-                else: st.error(f"Error: {res['message']}")
+                else: 
+                    # UPDATED: Persist server errors (like 402/403 out of credits) in the chat history
+                    err_msg = f"❌ {res['message']}"
+                    st.error(err_msg)
+                    st.session_state.messages.append({"role": "assistant", "content": err_msg})
         st.rerun()
 
 def view_settings():
@@ -412,7 +413,7 @@ def view_settings():
     chat_debug = st.checkbox("Enable Chat Debug Log (chat_debug.log)", value=config.getboolean("General", "chat_debug", fallback=False))
     st.divider()
     st.subheader("☁️ Strata Cloud Server")
-    server_url = st.text_input("Server URL (Endpoint /sync)", value=config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL))
+    server_url = st.text_input("Server URL (Endpoint /sync)", value=config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL), placeholder="http://<server-ip>:8000/api/v1/agent/sync")
     server_key = st.text_input("Server API Key", config.get("Server", "key", fallback=""), type="password")
     if st.button("Save"):
         if "General" not in config: config["General"] = {}

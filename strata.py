@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
-__VERSION__ = "1.2.3"
+__VERSION__ = "1.2.4"
 DEFAULT_SERVER_URL = "https://api.stratamonitor.com/api/v1/agent/sync"
 
 def log(msg):
@@ -56,7 +56,6 @@ def init_db(db_path):
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_dirs_scan_id ON directories(scan_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_dirs_parent ON directories(parent_path)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_scans_root ON scans(root_path)')
-    # NEW: Critical index for AI-generated Snapshot comparison JOINs
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_dir_scan_path ON directories (scan_id, path)')
     
     try: cursor.execute('ALTER TABLE scans ADD COLUMN disk_total_bytes INTEGER')
@@ -241,7 +240,7 @@ def test_connection(api_url, api_key):
             return {"success": True, "message": "Connection Established!", "code": 200} if response.status == 200 else {"success": False, "message": f"Status {response.status}"}
     except Exception as e: return {"success": False, "message": str(e)}
 
-# UPDATED: Kill-switch via progress_handler
+# UPDATED: Increased execution limit for heavy AI analytical queries
 def execute_sql_task(db_path, query):
     if not query: return {"error": "Received empty SQL query from server."}
     
@@ -253,7 +252,8 @@ def execute_sql_task(db_path, query):
     
     # Kill-switch variables
     ops_count = [0]
-    MAX_OPS = 1000 # * 1000 = 1,000,000 internal VM instructions
+    # MAX_OPS = 10,000 * 1000 instructions = 10,000,000 internal VM instructions limit
+    MAX_OPS = 10000 
     
     def progress_handler():
         ops_count[0] += 1
@@ -387,6 +387,7 @@ def run_chat_loop(user_query, history, server_config, db_path, debug_mode=False)
                     retry_count += 1; wait_time = 10; log(f"⚠️ Rate Limit (429). Retrying in {wait_time}s... ({retry_count}/{max_retries})"); time.sleep(wait_time)
                     if retry_count == max_retries: return {"success": False, "message": "Server Rate Limit Exceeded (429)."}
                 else:
+                    # UPDATED: Return the full error body so GUI can display details (e.g. 402 out of credits)
                     try: err = e.read().decode('utf-8')
                     except: err = str(e)
                     return {"success": False, "message": f"HTTP {e.code}: {err}"}
@@ -406,66 +407,3 @@ def run_chat_loop(user_query, history, server_config, db_path, debug_mode=False)
             exec_result = execute_sql_task(db_path, sql_query)
             result_str = json.dumps(exec_result, ensure_ascii=False)
             history.append({"role": "user", "type": "tool_result", "content": result_str})
-            rows_count = len(exec_result.get('data',[])) if 'data' in exec_result else 'Error'
-            log_debug(f"Rows returned: {rows_count}", debug_mode)
-            log_debug(f"SQL RESULT PAYLOAD: {result_str}", debug_mode)
-            time.sleep(5); continue
-        elif action == "final_answer":
-            answer_text = response_data.get("text")
-            if not answer_text: answer_text = response_data.get("content")
-            if not answer_text: answer_text = "(No text provided)"
-            history.append({"role": "assistant", "content": answer_text})
-            return {"success": True, "history": history, "answer": answer_text}
-        else: return {"success": False, "message": f"Unknown server action: {action}"}
-    return {"success": False, "message": "Max autonomous iterations reached."}
-
-def check_for_updates(current_version):
-    """Checks the GitHub API for the latest release tag."""
-    try:
-        url = "https://api.github.com/repos/stratamonitor/strata-agent/releases/latest"
-        req = urllib.request.Request(url, headers={'User-Agent': f'StrataClient/{current_version}'})
-        with urllib.request.urlopen(req, timeout=2) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            
-            tag_name = data.get("tag_name", "")
-            html_url = data.get("html_url", "")
-            
-            if not tag_name: 
-                return None
-            
-            def extract_v(v_str):
-                m = re.search(r'(\d+)\.(\d+)(?:\.(\d+))?', v_str)
-                if m: return tuple(int(x) if x else 0 for x in m.groups())
-                return (0,0,0)
-
-            curr_parts = extract_v(current_version)
-            latest_parts = extract_v(tag_name)
-            
-            if latest_parts > curr_parts:
-                return {"has_update": True, "latest_version": tag_name.lstrip('v'), "url": html_url}
-                    
-            return {"has_update": False}
-    except Exception:
-        return None
-
-if __name__ == "__main__":
-    config = load_config("strata.ini")
-    defaults = {"db": config.get("General", "db_path", fallback="strata.db"), "exclude": ""}
-    parser = argparse.ArgumentParser(description=f"Strata CLI v{__VERSION__}", formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument("--scan", type=str); parser.add_argument("--report", type=str); parser.add_argument("--db", type=str, default=defaults["db"]); parser.add_argument("--exclude", type=str)
-    parser.add_argument("--check-tasks", action="store_true", help="Check server for tasks")
-    args = parser.parse_args()
-    
-    update_info = check_for_updates(__VERSION__)
-    if update_info and update_info.get("has_update"):
-        print(f"\033[93m⚠️  UPDATE AVAILABLE: A new version (v{update_info['latest_version']}) is available! Download at: {update_info['url']}\033[0m\n")
-    
-    excludes = []
-    if args.scan: scan_directory(args.scan, args.db, excludes)
-    elif args.check_tasks:
-        url = config.get("Server", "url", fallback=DEFAULT_SERVER_URL); key = config.get("Server", "key", fallback="")
-        if url and key: 
-            res = check_tasks(url, key, args.db)
-            print(res) 
-        else: log("Server URL/Key missing in strata.ini")
-    else: parser.print_help()
