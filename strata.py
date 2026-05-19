@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
-__VERSION__ = "1.2.5"
+__VERSION__ = "1.2.6"
 DEFAULT_SERVER_URL = "https://api.stratamonitor.com/api/v1/agent/sync"
 
 def log(msg):
@@ -270,7 +270,7 @@ def execute_sql_task(db_path, query):
         
     except sqlite3.OperationalError as e:
         if "interrupted" in str(e).lower():
-            return {"error": "Query took too long. Please optimize using CTEs or simpler JOINs."}
+            return {"error": "Query took too long (Timeout). DO NOT use 'WITH' (CTEs). You MUST use a direct JOIN on the 'directories' table and filter by 'scan_id' in the WHERE clause so the database can use its indexes."}
         return {"error": str(e)}
     except Exception as e: 
         return {"error": str(e)}
